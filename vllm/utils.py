@@ -1092,21 +1092,72 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
         if args is None:
             args = sys.argv[1:]
 
-        # Convert underscores to dashes and vice versa in argument names
-        processed_args = []
-        for arg in args:
-            if arg.startswith('--'):
-                if '=' in arg:
-                    key, value = arg.split('=', 1)
-                    key = '--' + key[len('--'):].replace('_', '-')
-                    processed_args.append(f'{key}={value}')
-                else:
-                    processed_args.append('--' +
-                                          arg[len('--'):].replace('_', '-'))
-            else:
-                processed_args.append(arg)
-
+        processed_args: List[Union[str, int]] = list(map(FlexibleArgumentParser._process_args, args))
+        
         return super().parse_args(processed_args, namespace)
+
+    @staticmethod
+    def parse_args_from_config(file_path: str) -> Dict[str, Union[str, int]]:
+        config_args: List[str] = FlexibleArgumentParser._load_config_file(file_path)
+        processed_args = FlexibleArgumentParser._process_args(config_args)
+        
+        parser = argparse.ArgumentParser()
+        config_args = parser.parse_args(processed_args)
+
+        print(config_args)
+
+    @staticmethod
+    def _process_args(arg) -> Union[str, int]:
+        # Convert underscores to dashes and vice versa in argument names
+        if arg.startswith('--'):
+            if '=' in arg:
+                key, value = arg.split('=', 1)
+                key = '--' + key[len('--'):].replace('_', '-')
+                return f'{key}={value}'
+            else:
+                return '--' + arg[len('--'):].replace('_', '-')
+        else:
+            return arg
+
+    @staticmethod
+    def _load_config_file(file_path: str) -> List[str]:
+        """
+            loads a yaml file and returns the key value pairs as a 
+            flattened list with argparse like pattern
+            ```yaml
+                port: 12323
+                tensor-parallel-size: 4
+            ```
+            returns:
+                processed_args: list[str] = [
+                    '--port': '12323',
+                    '--tensor-parallel-size': '4'
+                ]
+            
+        """
+        extension: str = file_path.split('.')[-1]
+        if extension not in {'yaml', 'yml'}:
+            raise ValueError(
+                "Config file must be of a yaml/yml type.\
+                              %s supplied", extension)
+
+        # only expecting a flat dictionary of atomic types
+        processed_args: List[str] = []
+        config: Dict[str, Union[int, str]] = {}
+        try:
+            with open(file_path, 'r') as config_file:
+                config = yaml.safe_load(config_file)
+        except Exception as ex:
+            logger.error(
+                "Unable to read the config file at %s. \
+                Make sure path is correct", file_path)
+            raise ex
+
+        for key, value in config.items():
+            processed_args.append('--' + key)
+            processed_args.append(value)
+
+        return processed_args
 
 
 async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
