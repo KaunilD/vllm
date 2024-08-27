@@ -25,6 +25,7 @@ import numpy.typing as npt
 import psutil
 import torch
 import torch.types
+import yaml
 from typing_extensions import ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
@@ -1092,32 +1093,83 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
         if args is None:
             args = sys.argv[1:]
 
-        processed_args: List[Union[str, int]] = list(map(FlexibleArgumentParser._process_args, args))
-        
+        if '--config' in args:
+            args = FlexibleArgumentParser._pull_args_from_config(args)
+
+        # Convert underscores to dashes and vice versa in argument names
+        processed_args = []
+        for arg in args:
+            if arg.startswith('--'):
+                if '=' in arg:
+                    key, value = arg.split('=', 1)
+                    key = '--' + key[len('--'):].replace('_', '-')
+                    processed_args.append(f'{key}={value}')
+                else:
+                    processed_args.append('--' +
+                                          arg[len('--'):].replace('_', '-'))
+            else:
+                processed_args.append(arg)
+
         return super().parse_args(processed_args, namespace)
 
     @staticmethod
-    def parse_args_from_config(file_path: str) -> Dict[str, Union[str, int]]:
-        config_args: List[str] = FlexibleArgumentParser._load_config_file(file_path)
-        processed_args = FlexibleArgumentParser._process_args(config_args)
-        
-        parser = argparse.ArgumentParser()
-        config_args = parser.parse_args(processed_args)
+    def _pull_args_from_config(args: List[str]) -> List[str]:
+        """
+            method to pull arguments specified in the config file
+            into the commandline args variable.
+            
+            The arguments in config file will be inserted between 
+            the argument list.
+            
+            example:
+            ```yaml
+                port: 12323
+                tensor-parallel-size: 4
+            ```
+            ```python
+            $: vllm {serve,chat,complete} "facebook/opt-12B" \
+                --config config.yaml -tp 2
+            $: args = [
+                "serve,chat,complete",
+                "facebook/opt-12B", 
+                '--config', 'config.yaml', 
+                '-tp', '2'
+            ]
+            $: args = [
+                "serve,chat,complete",
+                "facebook/opt-12B", 
+                '--port', '12323', 
+                '--tensor-parallel-size', '4', 
+                '-tp', '2'
+                ]
+            ```
 
-        print(config_args)
+        """
+        assert args.count(
+            '--config') <= 1, "More than one config file specified!"
 
-    @staticmethod
-    def _process_args(arg) -> Union[str, int]:
-        # Convert underscores to dashes and vice versa in argument names
-        if arg.startswith('--'):
-            if '=' in arg:
-                key, value = arg.split('=', 1)
-                key = '--' + key[len('--'):].replace('_', '-')
-                return f'{key}={value}'
-            else:
-                return '--' + arg[len('--'):].replace('_', '-')
-        else:
-            return arg
+        index = args.index('--config')
+        if index == len(args) - 1:
+            raise ValueError("No config file specified! \
+                             Please check your commandline arguments.")
+
+        file_path = args[index + 1]
+        extension: str = file_path.split('.')[-1]
+        if extension not in {'yaml', 'yml'}:
+            raise ValueError(
+                "Config file must be of a yaml/yml type.\
+                              %s supplied", extension)
+
+        config_args = FlexibleArgumentParser._load_config_file(file_path)
+
+        # 0th index is for {serve,chat,complete}
+        # followed by config args
+        # followed by rest of cli args.
+        # maintaining this order will enforce the precedence
+        # of cli > config > defaults
+        args = [args[0]] + config_args + args[1:index] + args[index + 2:]
+
+        return args
 
     @staticmethod
     def _load_config_file(file_path: str) -> List[str]:
@@ -1135,14 +1187,10 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
                 ]
             
         """
-        extension: str = file_path.split('.')[-1]
-        if extension not in {'yaml', 'yml'}:
-            raise ValueError(
-                "Config file must be of a yaml/yml type.\
-                              %s supplied", extension)
-
         # only expecting a flat dictionary of atomic types
+
         processed_args: List[str] = []
+
         config: Dict[str, Union[int, str]] = {}
         try:
             with open(file_path, 'r') as config_file:
@@ -1155,7 +1203,7 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
 
         for key, value in config.items():
             processed_args.append('--' + key)
-            processed_args.append(value)
+            processed_args.append(str(value))
 
         return processed_args
 
